@@ -1,0 +1,656 @@
+
+"""Database models for InterviewMate — all PRD entities."""
+
+from sqlalchemy import (
+    UUID,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    JSON,
+    Table,
+    ForeignKey,
+)
+from sqlalchemy.orm import relationship
+from datetime import datetime, timezone
+import uuid
+
+from app.db.base import Base
+
+
+# ── User ──────────────────────────────────────────────────────────────
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    name = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True)
+    is_superuser = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    # Relationships
+    workspaces = relationship("Workspace", back_populates="owner", cascade="all, delete-orphan")
+
+
+# ── Workspace ─────────────────────────────────────────────────────────
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    is_default = Column(Boolean, default=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    owner_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+
+    owner = relationship("User", back_populates="workspaces")
+    resumes = relationship("Resume", back_populates="workspace")
+    jds = relationship("JobDescription", back_populates="workspace")
+    analyses = relationship("ResumeJDAnalysis", back_populates="workspace")
+
+
+# ── Resume ─────────────────────────────────────────────────────────────
+class Resume(Base):
+    __tablename__ = "resumes"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    source_file = Column(String(500), nullable=False)  # S3 key / object store path
+    original_filename = Column(String(255), nullable=False)
+    raw_text = Column(Text, nullable=True)  # parsed text, may be large
+    parse_status = Column(
+        String(50), default="pending"
+    )  # pending, parsed, failed, correcting
+    parse_warnings = Column(JSON, nullable=True)  # list of warnings
+    version_counter = Column(Integer, default=0)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Versioned confirmed data
+    confirmed_version = Column(Integer, default=0)
+    confirmed_data = Column(JSON, nullable=True)  # structured, validated output
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    workspace = relationship("Workspace", back_populates="resumes")
+    analyses = relationship(
+        "ResumeJDAnalysis", back_populates="resume", cascade="all, delete-orphan"
+    )
+
+
+# ── ResumeVersion ─────────────────────────────────────────────────────
+# (Stored as part of Resume JSON, but tracked explicitly)
+class ResumeVersion(Base):
+    __tablename__ = "resume_versions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=False
+    )
+    version_number = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)  # DOCX content or structured JSON
+    evidence_map = Column(JSON, nullable=True)  # maps bullets to source spans
+    status = Column(
+        String(50), default="approved"
+    )  # approved, rejected, archived
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    resume = relationship("Resume", back_populates="versions")
+
+
+# Add versions relationship to Resume
+Resume.version_rel = property(lambda self: None)  # placeholder
+Resume.versions = relationship("ResumeVersion", order_by=ResumeVersion.version_number, back_populates="resume")
+
+
+# ── JobDescription ────────────────────────────────────────────────────
+class JobDescription(Base):
+    __tablename__ = "job_descriptions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    source_file = Column(String(500), nullable=False)  # S3 key / object store path
+    original_filename = Column(String(255), nullable=False)
+    raw_text = Column(Text, nullable=True)
+    parse_status = Column(
+        String(50), default="pending"
+    )
+    parse_warnings = Column(JSON, nullable=True)
+    version = Column(Integer, default=1)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Confirmed structured data
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    confirmed_data = Column(JSON, nullable=True)
+
+    # Relationships
+    workspace = relationship("Workspace", back_populates="jds")
+    analyses = relationship(
+        "ResumeJDAnalysis", back_populates="job_description", cascade="all, delete-orphan"
+    )
+
+
+# ── ResumeJDAnalysis ──────────────────────────────────────────────────
+class ResumeJDAnalysis(Base):
+    __tablename__ = "resume_jd_analyses"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=False
+    )
+    job_description_id = Column(
+        UUID(as_uuid=True), ForeignKey("job_descriptions.id"), nullable=False
+    )
+    score = Column(Float, nullable=True)  # 0.0 - 1.0
+    methodology_version = Column(String(50), default="v1.0.0")
+    score_breakdown = Column(JSON, nullable=True)  # component: score
+    gaps = Column(JSON, nullable=True)  # structured gap list
+    recommendations = Column(JSON, nullable=True)
+    status = Column(String(50), default="pending")  # pending, completed, failed
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Evidence and confidence
+    confidence = Column(Float, nullable=True)  # 0.0 - 1.0
+    model_version = Column(String(100), nullable=True)
+    prompt_version = Column(String(50), default="v1.0.0")
+
+    # Relationships
+    resume = relationship("Resume", back_populates="analyses")
+    job_description = relationship("JobDescription", back_populates="analyses")
+
+
+# Re-set correct relationships after class definition
+Resume.analyses = relationship(
+    "ResumeJDAnalysis", order_by=ResumeJDAnalysis.id, back_populates="resume"
+)
+JobDescription.analyses = relationship(
+    "ResumeJDAnalysis", order_by=ResumeJDAnalysis.id, back_populates="job_description"
+)
+
+
+# ── Skill ─────────────────────────────────────────────────────────────
+class Skill(Base):
+    __tablename__ = "skills"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False, unique=True)
+    category = Column(String(100), nullable=True)  # technical, soft, domain, etc.
+    level = Column(String(50), nullable=True)  # beginner, intermediate, advanced, expert
+    years_experience = Column(Float, nullable=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Many-to-many via resume_skills / jd_skills
+    resumes = relationship(
+        "Resume", secondary="resume_skills", back_populates="skills_list"
+    )
+    jds = relationship(
+        "JobDescription", secondary="jd_skills", back_populates="skills_list"
+    )
+
+
+# Association tables
+resume_skills = Table(
+    "resume_skills",
+    Base.metadata,
+    Column("resume_id", UUID(as_uuid=True), ForeignKey("resumes.id"), primary_key=True),
+    Column("skill_id", UUID(as_uuid=True), ForeignKey("skills.id"), primary_key=True),
+)
+
+jd_skills = Table(
+    "jd_skills",
+    Base.metadata,
+    Column("jd_id", UUID(as_uuid=True), ForeignKey("job_descriptions.id"), primary_key=True),
+    Column("skill_id", UUID(as_uuid=True), ForeignKey("skills.id"), primary_key=True),
+)
+
+
+# ── SkillGap ──────────────────────────────────────────────────────────
+class SkillGap(Base):
+    __tablename__ = "skill_gaps"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=False
+    )
+    job_description_id = Column(
+        UUID(as_uuid=True), ForeignKey("job_descriptions.id"), nullable=False
+    )
+    skill_id = Column(
+        UUID(as_uuid=True), ForeignKey("skills.id"), nullable=False
+    )
+    gap_type = Column(
+        String(50),
+        nullable=False,
+    )  # missing, weak, outdated
+    severity = Column(
+        String(50), nullable=False
+    )  # critical, important, minor
+    evidence_from_jd = Column(Text, nullable=True)
+    suggested_action = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    resume = relationship("Resume", back_populates="skill_gaps")
+    skill = relationship("Skill", back_populates="skill_gaps")
+
+
+# Add skill_gaps relationship to Resume
+Resume.skill_gaps = relationship(
+    "SkillGap", order_by=SkillGap.id, back_populates="resume"
+)
+
+
+# ── InterviewSession ──────────────────────────────────────────────────
+class InterviewSession(Base):
+    __tablename__ = "interview_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=True
+    )
+    job_description_id = Column(
+        UUID(as_uuid=True), ForeignKey("job_descriptions.id"), nullable=True
+    )
+    type = Column(String(50), nullable=False)  # text, video, live
+    personality = Column(String(50), nullable=True)  # friendly, technical, challenging
+    duration_minutes = Column(Integer, nullable=True)
+    status = Column(
+        String(50), default="idle"
+    )  # idle, recording, transcribing, review, submitted, generating_feedback, error
+    score = Column(Float, nullable=True)  # overall session score
+    started_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationships
+    workspace = relationship("Workspace", back_populates="sessions")
+    resume = relationship("Resume", back_populates="interview_sessions")
+    job_description = relationship(
+        "JobDescription", back_populates="interview_sessions"
+    )
+
+
+# Add sessions relationship to Resume
+Resume.interview_sessions = relationship(
+    "InterviewSession", order_by=InterviewSession.id, back_populates="resume"
+)
+
+
+# ── InterviewQuestion ─────────────────────────────────────────────────
+class InterviewQuestion(Base):
+    __tablename__ = "interview_questions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(
+        UUID(as_uuid=True), ForeignKey("interview_sessions.id"), nullable=False
+    )
+    sequence = Column(Integer, nullable=False)  # question order within session
+    category = Column(
+        String(50), nullable=False
+    )  # recruiter, hr, behavioral, technical, product, system_design, case_study, problem_solving, situational, domain
+    difficulty = Column(String(50), nullable=False)  # easy, medium, hard
+    prompt = Column(Text, nullable=False)
+    rubric = Column(JSON, nullable=True)  # scoring rubric
+    expected_answer_signals = Column(JSON, nullable=True)
+    competency = Column(String(255), nullable=True)  # e.g., "leadership", "problem-solving"
+    source_references = Column(JSON, nullable=True)  # resume/JD references
+    relevance_reason = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    session = relationship("InterviewSession", back_populates="questions")
+
+
+# Add questions relationship to InterviewSession
+InterviewSession.questions = relationship(
+    "InterviewQuestion", order_by=InterviewQuestion.sequence, back_populates="session"
+)
+
+
+# ── InterviewAnswer ───────────────────────────────────────────────────
+class InterviewAnswer(Base):
+    __tablename__ = "interview_answers"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question_id = Column(
+        UUID(as_uuid=True), ForeignKey("interview_questions.id"), nullable=False
+    )
+    session_id = Column(
+        UUID(as_uuid=True), ForeignKey("interview_sessions.id"), nullable=False
+    )
+    answer_text = Column(Text, nullable=False)
+    transcript_uri = Column(String(500), nullable=True)  # S3 audio transcript
+    submission_time = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    follow_up_allowed = Column(Boolean, default=True)
+    follow_up_count = Column(Integer, default=0)
+    max_follow_ups = Column(Integer, default=3)
+    scores = Column(JSON, nullable=True)  # rubric scores per competency
+    evidence = Column(JSON, nullable=True)  # extracted evidence from answer
+    confidence = Column(Float, nullable=True)  # 0.0 - 1.0
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    question = relationship("InterviewQuestion", back_populates="answers")
+
+
+# Add answers relationship to InterviewQuestion
+InterviewQuestion.answers = relationship(
+    "InterviewAnswer", order_by=InterviewAnswer.submission_time, back_populates="question"
+)
+
+
+# ── InterviewEvaluation ───────────────────────────────────────────────
+class InterviewEvaluation(Base):
+    __tablename__ = "interview_evaluations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    answer_id = Column(
+        UUID(as_uuid=True), ForeignKey("interview_answers.id"), nullable=False
+    )
+    session_id = Column(
+        UUID(as_uuid=True), ForeignKey("interview_sessions.id"), nullable=False
+    )
+    overall_score = Column(Float, nullable=True)
+    strengths = Column(JSON, nullable=True)  # list of strength summaries
+    weaknesses = Column(JSON, nullable=True)  # list of weakness summaries
+    missing_points = Column(JSON, nullable=True)
+    better_answer_guidance = Column(Text, nullable=True)
+    confidence = Column(Float, nullable=True)  # 0.0 - 1.0
+    rubric_applied = Column(String(100), nullable=True)
+    model_version = Column(String(100), nullable=True)
+    prompt_version = Column(String(50), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    answer = relationship("InterviewAnswer", back_populates="evaluation")
+
+
+# Add evaluation relationship to InterviewAnswer
+InterviewAnswer.evaluation = relationship(
+    "InterviewEvaluation", back_populates="answer", uselist=False
+)
+
+
+# ── PracticeSession ───────────────────────────────────────────────────
+class PracticeSession(Base):
+    __tablename__ = "practice_sessions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=True
+    )
+    title = Column(String(255), nullable=True)
+    category = Column(String(100), nullable=True)  # technical, behavioral, product, etc.
+    status = Column(String(50), default="active")  # active, completed, archived
+    started_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    workspace = relationship("Workspace", back_populates="practice_sessions")
+
+
+# Add practice_sessions relationship to Workspace
+Workspace.practice_sessions = relationship(
+    "PracticeSession", order_by=PracticeSession.id, back_populates="workspace"
+)
+
+
+# ── ChallengeAttempt ──────────────────────────────────────────────────
+# (Placeholder for challenge mode - deferred to post-MVP)
+class ChallengeAttempt(Base):
+    __tablename__ = "challenge_attempts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=True
+    )
+    attempt_number = Column(Integer, default=1)
+    started_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    score = Column(Float, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ── Portfolio & PortfolioProject ──────────────────────────────────────
+class Portfolio(Base):
+    __tablename__ = "portfolios"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=False
+    )
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    is_public = Column(Boolean, default=False)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    # Relationships
+    workspace = relationship("Workspace", back_populates="portfolios")
+    projects = relationship(
+        "PortfolioProject", order_by="PortfolioProject.order_index", back_populates="portfolio"
+    )
+
+
+class PortfolioProject(Base):
+    __tablename__ = "portfolio_projects"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    portfolio_id = Column(
+        UUID(as_uuid=True), ForeignKey("portfolios.id"), nullable=False
+    )
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    url = Column(String(500), nullable=True)  # project website/links
+    github_url = Column(String(500), nullable=True)
+    order_index = Column(Integer, default=0)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    portfolio = relationship("Portfolio", back_populates="projects")
+
+
+# Add portfolios relationship to Workspace
+Workspace.portfolios = relationship(
+    "Portfolio", order_by=Portfolio.id, back_populates="workspace"
+)
+
+
+# ── ReadinessScore ───────────────────────────────────────────────────
+class ReadinessScore(Base):
+    __tablename__ = "readiness_scores"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=True
+    )
+    overall_score = Column(Float, nullable=True)  # 0.0 - 1.0
+    component_scores = Column(JSON, nullable=True)  # {component: score}
+    methodology_version = Column(String(50), default="v1.0.0")
+    evidence_count = Column(Integer, default=0)
+    total_possible = Column(Integer, default=0)
+    status = Column(String(50), default="partial")  # empty, partial, stale, complete, error
+    calculated_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    user = relationship("User", back_populates="readiness_scores")
+
+
+# Add readiness scores relationship to User
+User.readiness_scores = relationship(
+    "ReadinessScore", order_by=ReadinessScore.calculated_at, back_populates="user"
+)
+
+
+# ── UserProgress ────────────────────────────────────────────────────
+class UserProgress(Base):
+    __tablename__ = "user_progress"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    resume_id = Column(
+        UUID(as_uuid=True), ForeignKey("resumes.id"), nullable=True
+    )
+    milestone = Column(String(100), nullable=False)  # e.g., "resume_uploaded", "jd_pasted", "analysis_completed", "optimizer_approved", "mock_interview_started"
+    completed = Column(Boolean, default=False)
+    completed_at = Column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    user = relationship("User", back_populates="progress_history")
+
+
+# Add progress history relationship to User
+User.progress_history = relationship(
+    "UserProgress", order_by=UserProgress.id, back_populates="user"
+)
+
+
+# ── AuditEvent ───────────────────────────────────────────────────────
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )  # NULL for system events
+    action = Column(String(100), nullable=False)  # e.g., "resume_upload", "resume_export", "suggestion_accepted", "suggestion_rejected"
+    entity_type = Column(String(50), nullable=True)  # resume, jd, analysis, suggestion, export
+    entity_id = Column(UUID(as_uuid=True), nullable=True)
+    details = Column(JSON, nullable=True)  # free-form details
+    ip_address = Column(String(45), nullable=True)  # IPv4 or IPv6
+    user_agent = Column(String(500), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+# ── AIRequest / ModelRun metadata ────────────────────────────────────
+class AIRequest(Base):
+    __tablename__ = "ai_requests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    workspace_id = Column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id"), nullable=True
+    )
+    prompt_version = Column(String(50), nullable=False)
+    model_name = Column(String(100), nullable=False)
+    task_type = Column(
+        String(50), nullable=False
+    )  # extraction, matching, rewriting, question_generation, answer_evaluation
+    input_context_summary = Column(Text, nullable=True)  # bounded context identifiers
+    output_schema = Column(JSON, nullable=True)
+    output_validated = Column(Boolean, default=False)
+    output_valid_error = Column(Text, nullable=True)
+    tokens_used_input = Column(Integer, nullable=True)
+    tokens_used_output = Column(Integer, nullable=True)
+    latency_ms = Column(Integer, nullable=True)
+    cost_estimate = Column(Float, nullable=True)
+    model_response = Column(JSON, nullable=True)  # stored for audit (sanitized)
+    status = Column(String(50), default="pending")  # pending, success, failed, rate_limited
+    created_at = Column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+# Indexes for performance and constraint enforcement
+Index("ix_users_email", User.email, unique=True)
+Index("ix_users_is_active", User.is_active)
+Index("ix_workspaces_owner", Workspace.owner_id)
+Index("ix_resumes_workspace", Resume.workspace_id)
+Index("ix_resumes_parse_status", Resume.parse_status)
+Index("ix_jobdescriptions_workspace", JobDescription.workspace_id)
+Index("ix_resume_jd_analysis", ResumeJDAnalysis.resume_id, ResumeJDAnalysis.job_description_id)
+Index("ix_skill_gaps_resume_jd", SkillGap.resume_id, SkillGap.job_description_id, SkillGap.skill_id)
+Index("ix_interview_sessions_resume", InterviewSession.resume_id)
+Index("ix_interview_questions_session", InterviewQuestion.session_id, InterviewQuestion.sequence)
+Index("ix_interview_answers_question", InterviewAnswer.question_id)
+Index("ix_interview_evaluations_answer", InterviewEvaluation.answer_id)
+Index("ix_practice_sessions_workspace", PracticeSession.workspace_id)
+Index("ix_readiness_scores_user", ReadinessScore.user_id)
+Index("ix_user_progress_user", UserProgress.user_id, UserProgress.milestone)
+Index("ix_audit_events_user", AuditEvent.user_id, AuditEvent.created_at)
+Index("ix_ai_requests_user_workspace", AIRequest.user_id, AIRequest.workspace_id, AIRequest.created_at)
+Index("ix_ai_requests_status", AIRequest.status)
