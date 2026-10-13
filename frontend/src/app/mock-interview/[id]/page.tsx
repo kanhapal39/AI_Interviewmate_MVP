@@ -46,7 +46,7 @@ export default function MockInterviewPage() {
   const [loading, setLoading] = useState(false);
   const [isAutoSubmitEnabled, setIsAutoSubmitEnabled] = useState(true);
   const [silenceTimer, setSilenceTimer] = useState<NodeJS.Timeout | null>(null);
-  const answerRef = useRef<HTMLTextareaElement>(null);
+  const answerRef = useRef<HTMLTextAreaElement>(null);
 
   // Speech hooks
   const { isListening, transcript, error: sttError, start: startListening, stop: stopListening, reset: resetTranscript } = useSpeechRecognition({
