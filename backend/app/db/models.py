@@ -643,7 +643,8 @@ class AIRequest(Base):
 
 
 # Indexes for performance and constraint enforcement
-Index("ix_users_email", User.email, unique=True)
+# ix_users_email is created by User.email unique=True + index=True column definition
+# and explicitly in Alembic migration; do not declare here to avoid duplicate
 Index("ix_users_is_active", User.is_active)
 Index("ix_workspaces_owner", Workspace.owner_id)
 Index("ix_resumes_workspace", Resume.workspace_id)
