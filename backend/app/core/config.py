@@ -10,8 +10,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Application settings loaded from environment."""
 
-    # Mistral AI
-    MISTRAL_API_KEY: str = Field(..., env="MISTRAL_API_KEY")
+    # AI Provider Selection
+    AI_PROVIDER: str = Field("nvidia", env="AI_PROVIDER")  # "nvidia", "mistral", "mock"
+
+    # Mistral AI (optional - only required if AI_PROVIDER=mistral)
+    MISTRAL_API_KEY: str = Field("", env="MISTRAL_API_KEY")
+    
+    # NVIDIA AI (required if AI_PROVIDER=nvidia)
+    NVIDIA_API_KEY: str = Field("", env="NVIDIA_API_KEY")
+    NVIDIA_BASE_URL: str = Field("https://integrate.api.nvidia.com/v1", env="NVIDIA_BASE_URL")
+    NVIDIA_MODEL: str = Field("nvidia/nemotron-3.5-lightning-30b-a3b", env="NVIDIA_MODEL")
     
     # Database
     DATABASE_URL: str = Field(..., env="DATABASE_URL")
@@ -44,6 +52,14 @@ class Settings(BaseSettings):
     @property
     def ALLOWED_ORIGINS(self) -> List[str]:
         return [s.strip() for s in self.ALLOWED_ORIGINS_STR.split(",")]
+
+    @field_validator("AI_PROVIDER")
+    @classmethod
+    def validate_ai_provider(cls, v: str) -> str:
+        allowed = ["nvidia", "mistral", "mock"]
+        if v not in allowed:
+            raise ValueError(f"AI_PROVIDER must be one of {allowed}")
+        return v
 
     model_config = SettingsConfigDict(
         env_file=".env",

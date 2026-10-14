@@ -222,16 +222,13 @@ class MistralProvider:
         context: str,
         prompt_template: str,
         variables: Dict[str, Any],
-    ) -> BaseModel:
+    ) -> Optional[BaseModel]:
         """
         Extract structured data from context (resume, JD, etc.).
         Task-specific: resume extraction, JD extraction.
         """
         if self.mode == ProviderMode.MOCK:
-            # Return mock data matching the schema
-            return self._mock_json({}).model_validate(
-                schema.schema_json()
-            ) if hasattr(schema, "schema") else schema(**{})
+            return self._safe_fallback(schema)
 
         # Build the prompt with bounded context
         prompt = prompt_template.format(**variables, context=context)
@@ -270,15 +267,13 @@ class MistralProvider:
         jd_context: str,
         prompt_template: str,
         variables: Dict[str, Any],
-    ) -> BaseModel:
+    ) -> Optional[BaseModel]:
         """
         Perform resume-JD matching or skill categorization.
         Task-specific: requirement categorization, matching output.
         """
         if self.mode == ProviderMode.MOCK:
-            return self._mock_json({}).model_validate(
-                schema.schema_json()
-            ) if hasattr(schema, "schema") else schema(**{})
+            return self._safe_fallback(schema)
 
         prompt = prompt_template.format(
             resume_context=resume_context, jd_context=jd_context, **variables
@@ -312,12 +307,10 @@ class MistralProvider:
         source_text: str,
         prompt_template: str,
         variables: Dict[str, Any],
-    ) -> BaseModel:
+    ) -> Optional[BaseModel]:
         """Rewrite/resume optimization text."""
         if self.mode == ProviderMode.MOCK:
-            return self._mock_json({}).model_validate(
-                schema.schema_json()
-            ) if hasattr(schema, "schema") else schema(**{})
+            return self._safe_fallback(schema)
 
         prompt = prompt_template.format(
             source_text=source_text, **variables
@@ -355,12 +348,10 @@ class MistralProvider:
         difficulty: str,
         prompt_template: str,
         variables: Dict[str, Any],
-    ) -> BaseModel:
+    ) -> Optional[BaseModel]:
         """Generate interview questions."""
         if self.mode == ProviderMode.MOCK:
-            return self._mock_json({}).model_validate(
-                schema.schema_json()
-            ) if hasattr(schema, "schema") else schema(**{})
+            return self._safe_fallback(schema)
 
         prompt = prompt_template.format(
             resume_summary=resume_summary,
@@ -401,12 +392,10 @@ class MistralProvider:
         rubric: Dict[str, Any],
         prompt_template: str,
         variables: Dict[str, Any],
-    ) -> BaseModel:
+    ) -> Optional[BaseModel]:
         """Evaluate interview answer against rubric."""
         if self.mode == ProviderMode.MOCK:
-            return self._mock_json({}).model_validate(
-                schema.schema_json()
-            ) if hasattr(schema, "schema") else schema(**{})
+            return self._safe_fallback(schema)
 
         prompt = prompt_template.format(
             question=question, answer=answer, rubric=rubric, **variables
@@ -440,14 +429,41 @@ class MistralProvider:
         """Return a safe fallback when model output cannot be validated."""
         # Return schema with default/empty values
         try:
-            if hasattr(schema, "model_validate"):
+            from pydantic_core import PydanticUndefined
+            # Build defaults for all fields
+            defaults = {}
+            if hasattr(schema, "model_fields"):
                 # Pydantic v2
-                return schema.model_validate({})
-            else:
+                for field_name, field_info in schema.model_fields.items():
+                    if field_info.default is not None and field_info.default is not PydanticUndefined:
+                        defaults[field_name] = field_info.default
+                    elif field_info.default_factory is not None:
+                        defaults[field_name] = field_info.default_factory()
+                    else:
+                        # Provide sensible defaults based on type annotation
+                        annotation = field_info.annotation
+                        if annotation is str:
+                            defaults[field_name] = ""
+                        elif annotation is int:
+                            defaults[field_name] = 0
+                        elif annotation is float:
+                            defaults[field_name] = 0.0
+                        elif annotation is bool:
+                            defaults[field_name] = False
+                        elif annotation is list:
+                            defaults[field_name] = []
+                        elif annotation is dict:
+                            defaults[field_name] = {}
+            elif hasattr(schema, "__fields__"):
                 # Pydantic v1
-                return schema(**{k: v.default for k, v in schema.__fields__.items()})
+                for field_name, field_info in schema.__fields__.items():
+                    if field_info.default is not None:
+                        defaults[field_name] = field_info.default
+                    elif field_info.default_factory is not None:
+                        defaults[field_name] = field_info.default_factory()
+            
+            return schema(**defaults)
         except Exception:
-            # Last resort: return first model or empty
             return None
 
 
