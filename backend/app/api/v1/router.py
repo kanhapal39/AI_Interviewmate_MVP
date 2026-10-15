@@ -4,12 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 from datetime import datetime
 import json
+import asyncio
 
 from app.db.session import get_db
 from app.db import models as db_models
+from app.core.config import settings
 from app.schemas import (
     UserCreate, UserResponse,
     WorkspaceCreate, WorkspaceResponse,
@@ -325,7 +327,7 @@ async def confirm_jd(jd_id: UUID, user_id: UUID, db: Session = Depends(get_db)):
 # ── Resume-JD Analysis ───────────────────────────────────────────────
 @router.post("/analyses", response_model=AnalysisResponse, status_code=status.HTTP_201_CREATED)
 async def create_analysis(analysis: AnalysisCreate, db: Session = Depends(get_db)):
-    """Create a new resume-JD analysis."""
+    """Create a new resume-JD analysis and run it synchronously."""
     # Verify ownership
     resume = db.query(db_models.Resume).filter(
         db_models.Resume.id == analysis.resume_id
@@ -340,18 +342,117 @@ async def create_analysis(analysis: AnalysisCreate, db: Session = Depends(get_db
     if resume.user_id != analysis.user_id or jd.user_id != analysis.user_id:
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    # Check if raw text is available
+    if not resume.raw_text or not jd.raw_text:
+        analysis_obj = db_models.ResumeJDAnalysis(
+            workspace_id=resume.workspace_id,
+            resume_id=analysis.resume_id,
+            job_description_id=analysis.job_description_id,
+            status="failed",
+            gaps=[{"error": "Resume or JD text not available (not parsed yet)"}],
+        )
+        db.add(analysis_obj)
+        db.commit()
+        db.refresh(analysis_obj)
+        return analysis_obj
+
     analysis_obj = db_models.ResumeJDAnalysis(
         workspace_id=resume.workspace_id,
         resume_id=analysis.resume_id,
         job_description_id=analysis.job_description_id,
-        status="pending",
+        status="processing",
     )
     db.add(analysis_obj)
     db.commit()
     db.refresh(analysis_obj)
 
-    # Queue analysis job (Celery task in production)
-    # For MVP: return immediately
+    # Run analysis synchronously with timeout
+    try:
+        from app.services import match_resume_jd
+        from app.prompts.v1.gap_analysis import (
+            GapAnalysisSchema,
+            ResumeSuggestionSchema,
+            GAP_ANALYSIS_PROMPT,
+            RESUME_SUGGESTION_PROMPT,
+        )
+
+        # Helper to run sync function with timeout in executor
+        async def run_with_timeout(func, *args, timeout=60.0, **kwargs):
+            loop = asyncio.get_event_loop()
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: func(*args, **kwargs)),
+                timeout=timeout,
+            )
+
+        # First pass: gap analysis
+        gap_result = await run_with_timeout(
+            match_resume_jd,
+            GapAnalysisSchema,
+            resume.raw_text[:8000],
+            jd.raw_text[:8000],
+            GAP_ANALYSIS_PROMPT,
+            {},
+            timeout=60.0,
+        )
+
+        # Second pass: resume suggestions (if gaps found)
+        suggestions = []
+        if gap_result and gap_result.gaps:
+            suggestion_result = await run_with_timeout(
+                match_resume_jd,
+                ResumeSuggestionSchema,
+                resume.raw_text[:8000],
+                jd.raw_text[:8000],
+                RESUME_SUGGESTION_PROMPT,
+                {"gaps": gap_result.gaps},
+                timeout=60.0,
+            )
+            # ResumeSuggestionSchema returns a single suggestion object
+            # Convert to list format for storage
+            if suggestion_result:
+                suggestion_dict = suggestion_result.model_dump()
+                suggestions = [suggestion_dict]
+
+        # Populate analysis object
+        gaps = gap_result.gaps if gap_result else []
+        # Add mock_mode flag to each gap if in mock mode
+        if gap_result and getattr(gap_result, 'mock_mode', False):
+            for gap in gaps:
+                gap['mock_mode'] = True
+
+        # Add mock_mode flag to each suggestion if in mock mode
+        if getattr(suggestion_result, 'mock_mode', False) if 'suggestion_result' in locals() else False:
+            for suggestion in suggestions:
+                suggestion['mock_mode'] = True
+
+        # Ensure suggestions is a list (never None)
+        if suggestions is None:
+            suggestions = []
+
+        # Populate analysis object
+        analysis_obj.gaps = gaps
+        analysis_obj.recommendations = suggestions
+        analysis_obj.score = gap_result.confidence if gap_result else 0.0
+        analysis_obj.confidence = gap_result.confidence if gap_result else 0.0
+        analysis_obj.methodology_version = "v1.0.0"
+        analysis_obj.status = "completed"
+        analysis_obj.model_version = settings.AI_PROVIDER
+        analysis_obj.prompt_version = settings.DEFAULT_PROMPT_VERSION
+
+    except asyncio.TimeoutError:
+        analysis_obj.status = "failed"
+        analysis_obj.gaps = [{"error": "Analysis timed out after 60 seconds"}]
+        analysis_obj.recommendations = []
+        db.commit()
+        db.refresh(analysis_obj)
+        return analysis_obj
+    except Exception as e:
+        analysis_obj.status = "failed"
+        analysis_obj.gaps = [{"error": f"Analysis failed: {str(e)}"}]
+        analysis_obj.recommendations = []
+
+    db.commit()
+    db.refresh(analysis_obj)
 
     return analysis_obj
 
@@ -364,6 +465,10 @@ async def get_analysis(analysis_id: UUID, user_id: UUID, db: Session = Depends(g
     ).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
+    # Verify ownership via resume
+    resume = db.query(db_models.Resume).filter(db_models.Resume.id == analysis.resume_id).first()
+    if resume and resume.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
     return analysis
 
 
@@ -375,13 +480,16 @@ async def get_score_breakdown(analysis_id: UUID, user_id: UUID, db: Session = De
     ).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
+    resume = db.query(db_models.Resume).filter(db_models.Resume.id == analysis.resume_id).first()
+    if resume and resume.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     return {
         "score": analysis.score,
         "methodology_version": analysis.methodology_version,
         "score_breakdown": analysis.score_breakdown,
         "confidence": analysis.confidence,
-        "matched_evidence": analysis.gaps,  # or separate field
+        "matched_evidence": analysis.gaps,
         "unmatched_requirements": analysis.gaps,
     }
 
@@ -394,6 +502,9 @@ async def get_gap_analysis(analysis_id: UUID, user_id: UUID, db: Session = Depen
     ).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
+    resume = db.query(db_models.Resume).filter(db_models.Resume.id == analysis.resume_id).first()
+    if resume and resume.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     return {
         "gaps": analysis.gaps,
@@ -410,10 +521,26 @@ async def get_suggestions(analysis_id: UUID, user_id: UUID, db: Session = Depend
     ).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found")
+    resume = db.query(db_models.Resume).filter(db_models.Resume.id == analysis.resume_id).first()
+    if resume and resume.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
 
     # In production: fetch from suggestion table
     # For MVP: return from analysis.recommendations
-    return analysis.recommendations or []
+    # Ensure each suggestion has required fields for SuggestionResponse
+    suggestions = analysis.recommendations or []
+    return [
+        {
+            "id": s.get("id") or str(uuid4()),
+            "original": s.get("original", ""),
+            "ai_suggestion": s.get("ai_suggestion", ""),
+            "reason": s.get("reason", ""),
+            "confidence": s.get("confidence", 0.0),
+            "evidence_map": s.get("evidence_map"),
+            "should_export": s.get("should_export", False),
+        }
+        for s in suggestions
+    ]
 
 
 @router.post("/optimizer/suggestions/{suggestion_id}/accept")

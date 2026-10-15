@@ -16,6 +16,7 @@ from app.services.nvidia_provider import (
 from app.services.mistral_provider import (
     MistralProvider,
     get_provider as get_mistral_provider,
+    ProviderMode as MistralProviderMode,
     extract_structured as mistral_extract,
     match_resume_jd as mistral_match,
     generate_questions as mistral_generate,
@@ -29,6 +30,18 @@ class ProviderMode:
     MOCK = "mock"
 
 
+def _to_mistral_mode(mode: Optional[str]) -> Optional["MistralProviderMode"]:
+    """Convert string mode to MistralProviderMode enum."""
+    if mode is None:
+        return None
+    mode_lower = mode.lower()
+    if mode_lower == "mock":
+        return MistralProviderMode.MOCK
+    elif mode_lower == "mistral":
+        return MistralProviderMode.MISTRAL
+    return None
+
+
 def get_provider(mode: Optional[str] = None):
     """Get the configured AI provider instance based on settings."""
     ai_provider = settings.AI_PROVIDER.lower()
@@ -36,7 +49,7 @@ def get_provider(mode: Optional[str] = None):
     if ai_provider == "nvidia":
         return get_nvidia_provider(mode)
     elif ai_provider == "mistral":
-        return get_mistral_provider(mode)
+        return get_mistral_provider(_to_mistral_mode(mode))
     else:  # mock
         # Return NVIDIA provider in mock mode (works without API key)
         return get_nvidia_provider(ProviderMode.MOCK)

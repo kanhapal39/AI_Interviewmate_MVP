@@ -169,8 +169,8 @@ class SuggestionResponse(BaseModel):
     original: str
     ai_suggestion: str
     reason: str
-    confidence: float
-    evidence_map: Optional[Dict[str, Any]]
+    confidence: float = 0.0
+    evidence_map: Optional[Dict[str, Any]] = None
     should_export: bool = False
 
     class Config:

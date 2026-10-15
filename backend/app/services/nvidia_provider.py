@@ -248,7 +248,38 @@ class NVIDIAProvider:
                         defaults[field_name] = field_info.default
                     elif field_info.default_factory is not None:
                         defaults[field_name] = field_info.default_factory()
-            
+
+            # In mock mode, provide test data with mock_mode flag
+            if self.mode == ProviderMode.MOCK:
+                schema_name = schema.__name__
+                if schema_name == "GapAnalysisSchema":
+                    defaults.update({
+                        "gaps": [{
+                            "gap": "Test gap - missing Kubernetes experience",
+                            "why_it_matters": "Required for container orchestration",
+                            "evidence_from_jd": "Must have experience with Kubernetes orchestration",
+                            "suggested_action": "Add Kubernetes projects to resume",
+                            "severity": "critical",
+                            "mock_mode": True
+                        }],
+                        "gap_definitions": {"Test gap": "Missing Kubernetes experience"},
+                        "evidence_from_jd": {"Test gap": "Must have experience with Kubernetes orchestration"},
+                        "suggested_actions": ["Add Kubernetes projects to resume"],
+                        "confidence": 0.85,
+                        "insufficient_evidence": [],
+                        "mock_mode": True
+                    })
+                elif schema_name == "ResumeSuggestionSchema":
+                    defaults.update({
+                        "original": "Built microservices using Docker",
+                        "ai_suggestion": "Built and deployed microservices using Docker and Kubernetes on AWS EKS",
+                        "reason": "JD requires Kubernetes orchestration experience",
+                        "confidence": 0.85,
+                        "evidence_map": {"source": "jd", "section": "requirements"},
+                        "should_export": False,
+                        "mock_mode": True
+                    })
+
             return schema(**defaults)
         except Exception:
             return None
@@ -300,7 +331,10 @@ class NVIDIAProvider:
     ) -> Optional[BaseModel]:
         """Perform resume-JD matching or skill categorization."""
         if self.mode == ProviderMode.MOCK:
-            return self._safe_fallback(schema)
+            result = self._safe_fallback(schema)
+            if result and hasattr(result, 'mock_mode'):
+                result.mock_mode = True
+            return result
 
         prompt = prompt_template.format(
             resume_context=resume_context, jd_context=jd_context, **variables

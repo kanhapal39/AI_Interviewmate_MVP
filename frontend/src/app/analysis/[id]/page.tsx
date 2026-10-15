@@ -6,13 +6,45 @@ import Link from "next/link";
 
 type AnalysisTab = "overview" | "score" | "gaps" | "optimizer";
 
+interface Gap {
+  id: string;
+  gap: string;
+  why_it_matters: string;
+  evidence_from_jd: string;
+  suggested_action: string;
+  severity: "critical" | "important" | "minor";
+}
+
+interface Recommendation {
+  id: string;
+  original: string;
+  ai_suggestion: string;
+  reason: string;
+  confidence?: number;
+  evidence_map?: { source?: string; section?: string };
+  should_export: boolean;
+  mock_mode?: boolean;
+}
+
+interface Analysis {
+  id: string;
+  score: number;
+  methodology_version: string;
+  confidence: number;
+  score_breakdown: Record<string, number>;
+  gaps: Gap[];
+  recommendations: Recommendation[];
+}
+
 export default function AnalysisPage() {
   const router = useRouter();
   const params = useParams();
   const analysisId = params.id as string;
   const [tab, setTab] = useState<AnalysisTab>("overview");
-  const [analysis, setAnalysis] = useState<any>(null);
+  const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [mockMode, setMockMode] = useState(false);
 
   // Redirect if not logged in
   useEffect(() => {
@@ -23,62 +55,53 @@ export default function AnalysisPage() {
   }, [router]);
 
   useEffect(() => {
-    setTimeout(() => {
-      setAnalysis({
-        id: analysisId,
-        score: 0.73,
-        methodology_version: "v1.0.0",
-        confidence: 0.82,
-        score_breakdown: {
-          skills: 0.8,
-          experience: 0.7,
-          keywords: 0.65,
-          responsibilities: 0.75,
-          education: 0.8,
-          tools_technology: 0.7,
-          role_specific: 0.6,
-        },
-        gaps: [
-          {
-            id: "gap-1",
-            gap: "Kubernetes experience",
-            why_it_matters: "Required for deploying and managing containerized applications in production",
-            evidence_from_jd: "Must have experience with Kubernetes orchestration",
-            suggested_action: "Add Kubernetes projects or certifications to resume",
-            severity: "critical",
-          },
-          {
-            id: "gap-2",
-            gap: "GraphQL API design",
-            why_it_matters: "Preferred skill for modern API development",
-            evidence_from_jd: "Experience with GraphQL is a plus",
-            suggested_action: "Highlight any GraphQL experience or add a learning project",
-            severity: "minor",
-          },
-        ],
-        recommendations: [
-          {
-            id: "rec-1",
-            original: "Built microservices using Docker",
-            ai_suggestion: "Built and deployed microservices using Docker and Kubernetes on AWS EKS",
-            reason: "JD requires Kubernetes; Docker alone doesn't demonstrate orchestration experience",
-            confidence: 0.85,
-            evidence_map: { source: "jd", section: "requirements" },
-            should_export: false,
-          },
-          {
-            id: "rec-2",
-            original: "5 years of React experience",
-            ai_suggestion: "5+ years building production React applications with TypeScript, including performance optimization and state management with Redux/Zustand",
-            reason: "Add specificity about TypeScript and state management mentioned in JD",
-            confidence: 0.9,
-            evidence_map: { source: "jd", section: "required_skills" },
-            should_export: false,
-          },
-        ],
-      });
-      setLoading(false);
-    }, 500);
+    const fetchAnalysis = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+        // Fetch main analysis
+        const analysisRes = await fetch(`${API_BASE}/analyses/${analysisId}`, {
+          headers: { "Content-Type": "application/json" },
+        });
+        if (!analysisRes.ok) {
+          const err = await analysisRes.json();
+          throw new Error(err.detail || "Failed to fetch analysis");
+        }
+        const analysisData = await analysisRes.json();
+
+        // Fetch gaps/recommendations
+        const gapsRes = await fetch(`${API_BASE}/analyses/${analysisId}/gaps`, {
+          headers: { "Content-Type": "application/json" },
+        });
+        let gapsData = { gaps: [], recommendations: [] };
+        if (gapsRes.ok) {
+          gapsData = await gapsRes.json();
+        }
+
+        setAnalysis({
+          id: analysisData.id,
+          score: analysisData.score || 0,
+          methodology_version: analysisData.methodology_version || "v1.0.0",
+          confidence: analysisData.confidence || 0,
+          score_breakdown: analysisData.score_breakdown || {},
+          gaps: gapsData.gaps || [],
+          recommendations: gapsData.recommendations || [],
+        });
+
+        // Check for mock mode
+        const hasMock = (gapsData.gaps || []).some((g: any) => g.mock_mode) ||
+                       (gapsData.recommendations || []).some((r: any) => r.mock_mode);
+        setMockMode(hasMock);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load analysis");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAnalysis();
   }, [analysisId]);
 
   const tabs: { id: AnalysisTab; label: string; icon: string }[] = [
@@ -138,6 +161,21 @@ export default function AnalysisPage() {
             </p>
           </div>
 
+          {mockMode && (
+            <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg stack-sm">
+              <p className="text-amber-800">
+                <strong>Mock Mode Active:</strong> Results shown are test data.
+                Set <code>ENABLE_MOCK_PROVIDER=false</code> and provide API keys for real AI analysis.
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div className="mb-6 glass-card p-4 bg-red-50 border-red-200 stack-sm">
+              <p className="text-red-800"><strong>Error:</strong> {error}</p>
+            </div>
+          )}
+
           {tab === "overview" && (
             <div>
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
@@ -145,7 +183,7 @@ export default function AnalysisPage() {
                 <div className="glass-card p-6 stack-lg lg:col-span-1">
                   <div className="flex items-center justify-between">
                     <h3 className="text-title-md font-medium">Overall Match Score</h3>
-                    <span className="status-chip status-chip-info">Methodology v1.0.0</span>
+                    <span className="status-chip status-chip-info">Methodology v{analysis?.methodology_version}</span>
                   </div>
                   <div className="relative w-48 h-48 mx-auto">
                     <svg className="w-full h-full transform -rotate-90">
@@ -264,10 +302,25 @@ export default function AnalysisPage() {
 
           {tab === "gaps" && (
             <div className="stack-lg">
-              <div className="flex items-center justify-between">
-                <h2 className="text-title-md font-medium">Gap Analysis</h2>
-                <span className="text-body-sm text-on-surface-variant">{analysis?.gaps?.length || 0} gaps identified</span>
-              </div>
+              {(!analysis?.gaps || analysis.gaps.length === 0) && !error && (
+                <div className="glass-card p-8 text-center stack-md">
+                  <div className="w-16 h-16 rounded-full bg-surface-container flex items-center justify-center mx-auto mb-4 text-3xl">
+                    🎯
+                  </div>
+                  <h3 className="text-title-md font-medium">No Gaps Identified</h3>
+                  <p className="text-body-md text-on-surface-variant">
+                    Your resume appears to cover all requirements in the job description.
+                  </p>
+                </div>
+              )}
+
+              {analysis?.gaps && analysis.gaps.length > 0 && (
+                <div className="flex items-center justify-between">
+                  <h2 className="text-title-md font-medium">Gap Analysis</h2>
+                  <span className="text-body-sm text-on-surface-variant">{analysis.gaps.length} gaps identified</span>
+                </div>
+              )}
+
               <div className="space-y-4">
                 {analysis?.gaps?.map((gap: any) => (
                   <div key={gap.id} className="glass-card p-6 stack-md border-l-4 border-l-primary">
@@ -313,7 +366,12 @@ export default function AnalysisPage() {
                         <p className="label-sm text-on-surface-variant">Reason</p>
                         <p className="text-body-sm text-on-surface-variant">{rec.reason}</p>
                         <div className="flex items-center gap-2 mt-2">
-                          <span className="status-chip status-chip-info">Confidence: {Math.round(rec.confidence * 100)}%</span>
+                          {rec.confidence !== undefined && (
+                            <span className="status-chip status-chip-info">Match: {Math.round(rec.confidence * 100)}%</span>
+                          )}
+                          {rec.mock_mode && (
+                            <span className="status-chip status-chip-warning">Mock Data</span>
+                          )}
                         </div>
                       </div>
                     </div>
